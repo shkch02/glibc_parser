@@ -86,7 +86,15 @@ def main() -> None:
     )
 
     parse_result = parser.parse_wrapper_function("open")
-    redis_client.store_syscall_mapping("open", parse_result)
+    status = parse_result.get("status")
+
+    if status != "parsed":
+        print(
+            "[glibc-parser] WARN: Parsing did not succeed. "
+            f"status={status} message={parse_result.get('message', '')}"
+        )
+    else:
+        redis_client.store_syscall_mapping("open", parse_result)
 
     print("[glibc-parser] Execution completed.")
 

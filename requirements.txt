@@ -1,0 +1,4 @@
+clang==16.0.6
+redis==5.1.1
+requests==2.32.3
+

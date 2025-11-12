@@ -1,0 +1,37 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: glibc-parser-job
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: glibc-parser
+          image: your-registry/glibc-parser:latest
+          env:
+            - name: GLIBC_VERSION
+              value: "2.35"
+            - name: TARGET_ARCH
+              value: "x86_64"
+            - name: REDIS_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: glibc-parser-redis
+                  key: host
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: glibc-parser-redis
+                  key: password
+            - name: WORKSPACE_DIR
+              value: "/workspace"
+          volumeMounts:
+            - name: glibc-workspace
+              mountPath: /workspace
+      volumes:
+        - name: glibc-workspace
+          emptyDir: {}
+

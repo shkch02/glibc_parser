@@ -1,4 +1,4 @@
-# glibc parser
+# glibc parser 
 
 glibc 래퍼(syscall wrapper) 함수가 호출하는 커널 syscall을 역추적하여 Wrapper → Kernel 매핑을 수집하는 프로젝트입니다.  
 현재 버전(v2)은 libclang 기반 AST 파서와 텍스트 Fallback을 모두 지원하며, Redis 연동은 구조만 남겨둔 상태(printf 로깅)입니다.

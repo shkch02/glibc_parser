@@ -73,15 +73,15 @@ glibc_parser/
    ```
 
 2. 실행  
-   glibc 소스가 `/home/USER/glibc-sources/glibc-2.42/`에 있다고 가정할 때:
+   glibc 소스가 `/home/USER/glibc-sources/glibc-2.35/`에 있다고 가정할 때:
    ```bash
     docker run --rm \
       -v /home/USER/glibc-sources:/app/workspace \
-      -e GLIBC_VERSION=2.42 \
+      -e GLIBC_VERSION=2.35 \
       -e TARGET_ARCH=x86_64 \
       glibc-parser:v2
    ```
-   - 컨테이너 내부에서는 `/app/workspace/glibc-2.42/` 경로가 존재해야 합니다.
+   - 컨테이너 내부에서는 `/app/workspace/glibc-2.35/` 경로가 존재해야 합니다.
    - 추가 플래그가 필요하면 `-e LIBCLANG_PATH=/usr/lib/llvm-16/lib/libclang.so` 같은 환경변수를 추가하세요.
 
 ### 2. 로컬 실행 (Ubuntu 예시)
@@ -93,9 +93,9 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2) glibc 소스 배치 (예: workspace/glibc-2.42/)
+# 2) glibc 소스 배치 (예: workspace/glibc-2.35/)
 # 3) 필요 시 환경변수 설정
-export GLIBC_VERSION=2.42
+export GLIBC_VERSION=2.35
 export TARGET_ARCH=x86_64
 # export LIBCLANG_PATH=/usr/lib/llvm-16/lib/libclang.so
 

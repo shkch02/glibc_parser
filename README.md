@@ -73,12 +73,14 @@ glibc_parser/
    ```
 
 2. 실행  
-   glibc 소스가 `/home/USER/glibc-sources/glibc-2.35/`에 있다고 가정할 때:
+   glibc 소스가 `/home/shkch/glibc-sources/glibc-2.35/`에 있다고 가정할 때:
    ```bash
-    docker run --rm \
-      -v /home/USER/glibc-sources:/app/workspace \
+    sudo docker run --rm \
+      -v /home/shkch/glibc-sources:/app/workspace \
       -e GLIBC_VERSION=2.35 \
       -e TARGET_ARCH=x86_64 \
+      -e LIBCLANG_PATH=/usr/lib/llvm-14/lib/libclang.so \
+
       glibc-parser:v2
    ```
    - 컨테이너 내부에서는 `/app/workspace/glibc-2.35/` 경로가 존재해야 합니다.
@@ -97,8 +99,7 @@ pip install -r requirements.txt
 # 3) 필요 시 환경변수 설정
 export GLIBC_VERSION=2.35
 export TARGET_ARCH=x86_64
-# export LIBCLANG_PATH=/usr/lib/llvm-16/lib/libclang.so
-
+export LIBCLANG_PATH=/usr/lib/llvm-14/lib/libclang.so
 # 4) 실행
 python -m src.main
 ```

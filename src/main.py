@@ -93,6 +93,8 @@ def main() -> None:
             "[glibc-parser] WARN: Parsing did not succeed. "
             f"status={status} message={parse_result.get('message', '')}"
         )
+        if 'source_path' in parse_result:	
+            print(f" - Analyzed File: {parse_result['source_path']}")
     else:
         redis_client.store_syscall_mapping("open", parse_result)
 

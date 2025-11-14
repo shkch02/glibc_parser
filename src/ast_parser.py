@@ -247,7 +247,7 @@ class GlibcAstParser:
                 return
 
             # Macro expansion
-            if kind == cindex.CursorKind.MACRO_EXPANSION and node.spelling in target_macros:
+            if kind == cindex.CursorKind.MACRO_INSTANTIATION and node.spelling in target_macros:
                 self._process_syscall_node(node, results, origin_macro=node.spelling)
 
             # Direct calls

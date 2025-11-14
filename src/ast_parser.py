@@ -201,6 +201,7 @@ class GlibcAstParser:
             "-D_GNU_SOURCE=1",
             "-D__USE_GNU=1",
             "-D__LINUX__=1",
+            "-D_LIBC=1",
             f"-D__{self.target_arch.upper()}__=1",
         ]
         for inc in include_dirs:

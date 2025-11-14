@@ -79,8 +79,7 @@ glibc_parser/
       -v /home/shkch/glibc-sources:/app/workspace \
       -e GLIBC_VERSION=2.35 \
       -e TARGET_ARCH=x86_64 \
-      -e LIBCLANG_PATH=/usr/lib/llvm-14/lib/libclang.so \
-
+      -e LIBCLANG_PATH=/usr/lib/llvm-19/lib/libclang.so \
       glibc-parser:v2
    ```
    - 컨테이너 내부에서는 `/app/workspace/glibc-2.35/` 경로가 존재해야 합니다.

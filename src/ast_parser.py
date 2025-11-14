@@ -15,8 +15,9 @@ except ImportError:  # pragma: no cover - optional dependency guard
 # Text-fallback macro patterns (used when libclang is unavailable or fails)
 SYS_CALL_MACRO_PATTERN = re.compile(
     r"(INLINE_SYSCALL|INTERNAL_SYSCALL|INTERNAL_SYSCALL_DECL|INTERNAL_SYSCALL_CALL|"
-    r"SYSCALL_CANCEL|SYSCALL_CANCEL_IF|__libc_do_syscall)\s*\(",
-    re.MULTILINE,
+    r"SYSCALL_CANCEL|SYSCALL_CANCEL_IF|__libc_do_syscall|"
+    r"internal_syscall[0-6]|__open_nocancel|__openat_nocancel)\s*\(",
+    re.MULTILINE | re.IGNORECASE,
 )
 
 
@@ -116,32 +117,41 @@ class GlibcAstParser:
         """
         # Try v2 multi-pass over likely file(s) containing symbol
         source_path = self._locate_symbol_source(symbol)
-        if source_path is not None and cindex is not None:
-            results = self.run_full_analysis(
-                c_files=[source_path],
-                enable_time64_round=True,
-            )
-            if symbol in results and results[symbol]:
-                first = results[symbol][0]
-                return {
-                    "kernel_syscall": first.kernel_symbol,
-                    "args_mapping_json": json.dumps(
-                        [{"strategy": "raw", "value": arg} for arg in first.raw_arguments],
-                        ensure_ascii=False,
-                    ),
-                    "macro_name": first.origin_macro,
-                    "source_path": first.source_location,
-                    "status": "parsed",
-                }
-
-        # Fallback: text-based single-file heuristic
-        source_path = source_path or self._locate_symbol_source(symbol)
         if source_path is None:
             return {
                 "status": "symbol_not_found",
                 "message": f"Unable to locate source file for `{symbol}` under {self.glibc_root}",
             }
+        
+        print(f"[glibc-parser] Located source file: {source_path}")
+        
+        if cindex is not None:
+            print(f"[glibc-parser] Attempting libclang-based parsing...")
+            try:
+                results = self.run_full_analysis(
+                    c_files=[source_path],
+                    enable_time64_round=True,
+                )
+                if symbol in results and results[symbol]:
+                    first = results[symbol][0]
+                    print(f"[glibc-parser] libclang parsing succeeded for `{symbol}`")
+                    return {
+                        "kernel_syscall": first.kernel_symbol,
+                        "args_mapping_json": json.dumps(
+                            [{"strategy": "raw", "value": arg} for arg in first.raw_arguments],
+                            ensure_ascii=False,
+                        ),
+                        "macro_name": first.origin_macro,
+                        "source_path": first.source_location,
+                        "status": "parsed",
+                    }
+                else:
+                    print(f"[glibc-parser] libclang parsing found no results for `{symbol}`, falling back to text parsing")
+            except Exception as error:
+                print(f"[glibc-parser] libclang parsing failed: {error}, falling back to text parsing")
 
+        # Fallback: text-based single-file heuristic
+        print(f"[glibc-parser] Attempting text-based parsing for `{symbol}`...")
         try:
             result = self._extract_syscall_info_text(symbol, source_path)
         except Exception as error:  # pragma: no cover - defensive logging
@@ -158,6 +168,7 @@ class GlibcAstParser:
                 "source_path": str(source_path),
             }
 
+        print(f"[glibc-parser] Text-based parsing succeeded for `{symbol}`")
         return result.as_payload()
 
     # ----------------------- libclang initialisation ----------------------- #
@@ -208,6 +219,7 @@ class GlibcAstParser:
         target_macros: Tuple[str, ...],
     ) -> Dict[str, List[SyscallCallInfo]]:
         if cindex is None:
+            print("[glibc-parser] WARN: libclang not available, skipping AST parsing")
             return {}
 
         index = cindex.Index.create()
@@ -216,16 +228,22 @@ class GlibcAstParser:
         tu_options = cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD
         for source_file in files:
             try:
+                print(f"[glibc-parser] Parsing {source_file.name} with libclang...")
                 tu = index.parse(
                     path=str(source_file),
                     args=clang_args,
                     options=tu_options,
                 )
-            except Exception:
-                # Skip files that fail to parse in the current flag set
+                if tu is None:
+                    print(f"[glibc-parser] WARN: Failed to create translation unit for {source_file.name}")
+                    continue
+            except Exception as e:
+                print(f"[glibc-parser] WARN: Failed to parse {source_file.name}: {e}")
                 continue
 
             file_results = self._walk_ast(tu, source_file, target_macros)
+            if file_results:
+                print(f"[glibc-parser] Found {sum(len(v) for v in file_results.values())} syscall(s) in {source_file.name}")
             _merge_results(aggregate, file_results)
 
         return aggregate
@@ -379,20 +397,42 @@ class GlibcAstParser:
 
         signature, body = self._slice_function_block(source, symbol)
         if signature is None or body is None:
+            print(f"[glibc-parser] DEBUG: Failed to extract function block for `{symbol}`")
+            # Try searching for any syscall macro in the entire file as fallback
+            macro_match = SYS_CALL_MACRO_PATTERN.search(source)
+            if macro_match:
+                print(f"[glibc-parser] DEBUG: Found macro in file but couldn't extract function block")
             return None
+
+        print(f"[glibc-parser] DEBUG: Extracted function body (length: {len(body)} chars)")
 
         macro_match = SYS_CALL_MACRO_PATTERN.search(body)
         if not macro_match:
+            print(f"[glibc-parser] DEBUG: No syscall macro found in function body")
+            # Debug: show first 500 chars of body
+            preview = body[:500].replace('\n', '\\n')
+            print(f"[glibc-parser] DEBUG: Function body preview: {preview}...")
             return None
 
         macro_name = macro_match.group(1)
+        print(f"[glibc-parser] DEBUG: Found macro: {macro_name}")
         macro_start = macro_match.end()
         macro_call, arguments = self._extract_macro_arguments_text(body, macro_start)
         if macro_call is None or not arguments:
+            print(f"[glibc-parser] DEBUG: Failed to extract macro arguments")
             return None
 
+        print(f"[glibc-parser] DEBUG: Extracted {len(arguments)} arguments")
         kernel_symbol = arguments[0].strip()
-        syscall_args = arguments[2:] if len(arguments) > 2 else []
+        # Handle different macro argument patterns
+        # Some macros: MACRO(kernel, nargs, arg0, arg1, ...)
+        # Others: MACRO(kernel, arg0, arg1, ...)
+        if len(arguments) > 2 and arguments[1].strip().isdigit():
+            # Has nargs parameter
+            syscall_args = arguments[2:]
+        else:
+            # No nargs parameter
+            syscall_args = arguments[1:]
 
         return SyscallExtractionResult(
             source_path=source_path.resolve(),
@@ -407,28 +447,62 @@ class GlibcAstParser:
         source: str,
         symbol: str,
     ) -> Tuple[Optional[str], Optional[str]]:
+        # Try multiple patterns: open, __open, __open64, etc.
+        # Order matters: try more specific patterns first
         patterns = [
-            rf"\b{symbol}\s*\(",
-            rf"\b__{symbol}\s*\(",
+            # Function definitions at start of line (most common)
+            (rf"^[^\n]*\b{re.escape(symbol)}\s*\(", re.MULTILINE),
+            (rf"^[^\n]*\b__{re.escape(symbol)}\s*\(", re.MULTILINE),
+            (rf"^[^\n]*\b__{re.escape(symbol)}64\s*\(", re.MULTILINE),
+            # Anywhere in the file (fallback)
+            (rf"\b{re.escape(symbol)}\s*\(", 0),
+            (rf"\b__{re.escape(symbol)}\s*\(", 0),
         ]
 
-        for pattern in patterns:
-            match = re.search(pattern, source)
-            if not match:
-                continue
+        for pattern, flags in patterns:
+            matches = list(re.finditer(pattern, source, flags))
+            for match in matches:
+                pos = match.start()
+                
+                # Find the opening brace after the function name
+                # Search from the end of the match (after the opening paren)
+                search_start = match.end()
+                brace_start = source.find("{", search_start)
+                if brace_start == -1:
+                    continue
+                
+                # Verify this looks like a function definition
+                # Check if there's a closing paren before the brace (function signature)
+                paren_end = source.rfind(")", search_start, brace_start)
+                if paren_end == -1:
+                    continue
+                
+                # Look backwards for function-like context
+                # Accept if there's whitespace/newline before (likely a definition)
+                before_pos = max(0, pos - 100)
+                context = source[before_pos:pos]
+                # Skip if it's clearly a function call (has something like "function(" before)
+                if re.search(r'[a-zA-Z_][a-zA-Z0-9_]*\s*\([^)]*\)\s*$', context):
+                    continue
 
-            header_start = source.rfind("\n", 0, match.start())
-            header_start = 0 if header_start == -1 else header_start
-            brace_start = source.find("{", match.end())
-            if brace_start == -1:
-                continue
+                # Extract signature (from start of line or reasonable point before)
+                header_start = source.rfind("\n", 0, pos)
+                header_start = 0 if header_start == -1 else header_start
+                
+                # Get signature up to the brace
+                sig_start = max(header_start, brace_start - 1000)  # Allow longer signatures
+                signature = source[sig_start:brace_start].strip()
+                
+                # Extract function body
+                body, _ = GlibcAstParser._collect_brace_block(source, brace_start)
+                if body is None:
+                    continue
 
-            signature = source[header_start:brace_start]
-            body, _ = GlibcAstParser._collect_brace_block(source, brace_start)
-            if body is None:
-                continue
+                # Verify body is not empty and contains something useful
+                if len(body.strip()) < 10:
+                    continue
 
-            return signature, body
+                return signature, body
 
         return None, None
 

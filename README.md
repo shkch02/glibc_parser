@@ -24,9 +24,11 @@ glibc 래퍼(syscall wrapper) 함수가 호출하는 커널 syscall을 역추적
 ```
 glibc_parser/
 ├── src/
-│   ├── main.py          # 실행 엔트리포인트 (환경변수 로딩, 파서 호출, Redis 스텁 로깅)
-│   ├── ast_parser.py    # v2 AST 파서 (libclang + Fallback)
-│   └── redis_helper.py  # Redis 스텁 (연결/저장 동작을 print로 대체)
+│   ├── main.py                # 실행 엔트리포인트 (환경변수 로딩, 파서 호출, Redis 스텁 로깅)
+│   ├── ast_parser.py          # libclang 중심 AST 파서 (멀티패스, 조건부 컴파일 처리)
+│   ├── text_fallback_parser.py# 순수 텍스트 기반 폴백 파서 (libclang 없이 테스트 가능)
+│   ├── models.py              # SyscallCallInfo, SyscallExtractionResult 등 DTO/merge 유틸
+│   └── redis_helper.py        # Redis 스텁 (연결/저장 동작을 print로 대체)
 ├── k8s/
 │   └── glibc-parser-job.yaml  # K8s Job 매니페스트 초안
 ├── workspace/           # glibc 소스를 수동 배치하는 경로 (버전별 하위 폴더)
@@ -107,11 +109,17 @@ python -m src.main
 
 ---
 
-## 파서 활용 팁
+## 모듈 가이드 & 활용 팁
 
-- 기본 엔트리포인트(`src/main.py`)는 `open` 래퍼 함수를 대상으로 동작 검증용 파싱을 수행합니다.
-- 대규모 분석을 수행하려면 `src/ast_parser.py`의 `GlibcAstParser.run_full_analysis()`를 직접 호출하여 Wrapper → `SyscallCallInfo[]` 매핑을 얻을 수 있습니다.
-- 파싱에 실패한다면 `_build_default_clang_args()`를 참고해 추가적인 `-I`, `-D` 플래그를 전달하거나, `LIBCLANG_PATH`를 명시적으로 지정해 보세요.
+- `src/models.py`  
+  - `SyscallCallInfo`, `SyscallExtractionResult`, `merge_results` 등을 정의한 공통 DTO 레이어
+- `src/ast_parser.py`  
+  - libclang 기반 멀티패스 파서. 필요 시 `GlibcAstParser.run_full_analysis()` 호출로 전체 매핑 생성
+- `src/text_fallback_parser.py`  
+  - 텍스트 기반 폴백 로직만 별도 분리. libclang이 없는 환경에서도 개별 함수 파싱 테스트 가능
+- `src/main.py`  
+  - 현재는 `open` 심볼만 대상으로 흐름 검증. 다른 심볼을 실험하려면 여기서 호출 대상 변경
+- 파싱 실패 시 `_build_default_clang_args()`를 참고해 추가 `-I`, `-D` 플래그를 더해주거나 `LIBCLANG_PATH`를 명시적으로 지정하세요.
 
 ---
 

@@ -1,10 +1,9 @@
 import json
 import os
 import re
-from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     from clang import cindex
@@ -12,41 +11,8 @@ except ImportError:  # pragma: no cover - optional dependency guard
     cindex = None  # type: ignore[misc]
 
 
-# Text-fallback macro patterns (used when libclang is unavailable or fails)
-SYS_CALL_MACRO_PATTERN = re.compile(
-    r"(INLINE_SYSCALL|INTERNAL_SYSCALL|INTERNAL_SYSCALL_DECL|INTERNAL_SYSCALL_CALL|"
-    r"SYSCALL_CANCEL|SYSCALL_CANCEL_IF|__libc_do_syscall|"
-    r"internal_syscall[0-6]|__open_nocancel|__openat_nocancel)\s*\(",
-    re.MULTILINE | re.IGNORECASE,
-)
-
-
-@dataclass(frozen=True)
-class SyscallCallInfo:
-    kernel_symbol: str
-    raw_arguments: List[str]
-    conditional_context: str
-    source_location: str
-    origin_macro: str
-
-
-@dataclass(frozen=True)
-class SyscallExtractionResult:
-    source_path: Path
-    macro_name: str
-    kernel_symbol: str
-    raw_arguments: Sequence[str]
-    function_signature: str
-
-    def as_payload(self) -> Dict[str, Any]:
-        mapping = [{"strategy": "raw", "value": argument.strip()} for argument in self.raw_arguments]
-        return {
-            "kernel_syscall": self.kernel_symbol,
-            "args_mapping_json": json.dumps(mapping, ensure_ascii=False),
-            "macro_name": self.macro_name,
-            "source_path": str(self.source_path),
-            "status": "parsed",
-        }
+from .models import SyscallCallInfo, merge_results
+from .text_fallback_parser import extract_syscall_info_text, split_arguments
 
 
 class GlibcAstParser:
@@ -100,13 +66,13 @@ class GlibcAstParser:
 
         # Round 1: base flags
         results_base = self._parsing_loop(files, base_flags, macros)
-        _merge_results(union_results, results_base)
+        merge_results(union_results, results_base)
 
         # Round 2: _TIME_BITS=64
         if enable_time64_round:
             time64_flags = list(base_flags) + ["-D_TIME_BITS=64", "-D__USE_TIME_BITS64=1"]
             results_time64 = self._parsing_loop(files, time64_flags, macros)
-            _merge_results(union_results, results_time64)
+            merge_results(union_results, results_time64)
 
         return union_results
 
@@ -153,7 +119,7 @@ class GlibcAstParser:
         # Fallback: text-based single-file heuristic
         print(f"[glibc-parser] Attempting text-based parsing for `{symbol}`...")
         try:
-            result = self._extract_syscall_info_text(symbol, source_path)
+            result = extract_syscall_info_text(symbol, source_path)
         except Exception as error:  # pragma: no cover - defensive logging
             return {
                 "status": "parse_error",
@@ -201,7 +167,7 @@ class GlibcAstParser:
             "-D_GNU_SOURCE=1",
             "-D__USE_GNU=1",
             "-D__LINUX__=1",
-            "-D_LIBC=1",
+            "-D_LIBC=1", #
             f"-D__{self.target_arch.upper()}__=1",
         ]
         for inc in include_dirs:
@@ -245,7 +211,7 @@ class GlibcAstParser:
             file_results = self._walk_ast(tu, source_file, target_macros)
             if file_results:
                 print(f"[glibc-parser] Found {sum(len(v) for v in file_results.values())} syscall(s) in {source_file.name}")
-            _merge_results(aggregate, file_results)
+            merge_results(aggregate, file_results)
 
         return aggregate
 
@@ -338,12 +304,12 @@ class GlibcAstParser:
             if not m2:
                 return None, []
             kernel, rest = m2.group(1).strip(), m2.group(2)
-            args = self._split_arguments(rest)
+            args = split_arguments(rest)
             return kernel, [a.strip() for a in args]
 
         kernel = m.group(1).strip()
         rest = m.group(3)
-        args = self._split_arguments(rest)
+        args = split_arguments(rest)
         return kernel, [a.strip() for a in args]
 
     def _extract_conditional_context(self, node: "cindex.Cursor") -> str:
@@ -388,201 +354,6 @@ class GlibcAstParser:
         )
         results.setdefault(wrapper_name, []).append(info)
 
-    # ----------------------------- Text fallback --------------------------- #
-    def _extract_syscall_info_text(
-        self,
-        symbol: str,
-        source_path: Path,
-    ) -> Optional[SyscallExtractionResult]:
-        source = source_path.read_text(encoding="utf-8", errors="ignore")
-
-        signature, body = self._slice_function_block(source, symbol)
-        if signature is None or body is None:
-            print(f"[glibc-parser] DEBUG: Failed to extract function block for `{symbol}`")
-            # Try searching for any syscall macro in the entire file as fallback
-            macro_match = SYS_CALL_MACRO_PATTERN.search(source)
-            if macro_match:
-                print(f"[glibc-parser] DEBUG: Found macro in file but couldn't extract function block")
-            return None
-
-        print(f"[glibc-parser] DEBUG: Extracted function body (length: {len(body)} chars)")
-
-        macro_match = SYS_CALL_MACRO_PATTERN.search(body)
-        if not macro_match:
-            print(f"[glibc-parser] DEBUG: No syscall macro found in function body")
-            # Debug: show first 500 chars of body
-            preview = body[:500].replace('\n', '\\n')
-            print(f"[glibc-parser] DEBUG: Function body preview: {preview}...")
-            return None
-
-        macro_name = macro_match.group(1)
-        print(f"[glibc-parser] DEBUG: Found macro: {macro_name}")
-        macro_start = macro_match.end()
-        macro_call, arguments = self._extract_macro_arguments_text(body, macro_start)
-        if macro_call is None or not arguments:
-            print(f"[glibc-parser] DEBUG: Failed to extract macro arguments")
-            return None
-
-        print(f"[glibc-parser] DEBUG: Extracted {len(arguments)} arguments")
-        kernel_symbol = arguments[0].strip()
-        # Handle different macro argument patterns
-        # Some macros: MACRO(kernel, nargs, arg0, arg1, ...)
-        # Others: MACRO(kernel, arg0, arg1, ...)
-        if len(arguments) > 2 and arguments[1].strip().isdigit():
-            # Has nargs parameter
-            syscall_args = arguments[2:]
-        else:
-            # No nargs parameter
-            syscall_args = arguments[1:]
-
-        return SyscallExtractionResult(
-            source_path=source_path.resolve(),
-            macro_name=macro_name,
-            kernel_symbol=kernel_symbol,
-            raw_arguments=syscall_args,
-            function_signature=signature.strip(),
-        )
-
-    @staticmethod
-    def _slice_function_block(
-        source: str,
-        symbol: str,
-    ) -> Tuple[Optional[str], Optional[str]]:
-        # Try multiple patterns: open, __open, __open64, etc.
-        # Order matters: try more specific patterns first
-        patterns = [
-            # Function definitions at start of line (most common)
-            (rf"^[^\n]*\b{re.escape(symbol)}\s*\(", re.MULTILINE),
-            (rf"^[^\n]*\b__{re.escape(symbol)}\s*\(", re.MULTILINE),
-            (rf"^[^\n]*\b__{re.escape(symbol)}64\s*\(", re.MULTILINE),
-            # Anywhere in the file (fallback)
-            (rf"\b{re.escape(symbol)}\s*\(", 0),
-            (rf"\b__{re.escape(symbol)}\s*\(", 0),
-        ]
-
-        for pattern, flags in patterns:
-            matches = list(re.finditer(pattern, source, flags))
-            for match in matches:
-                pos = match.start()
-                
-                # Find the opening brace after the function name
-                # Search from the end of the match (after the opening paren)
-                search_start = match.end()
-                brace_start = source.find("{", search_start)
-                if brace_start == -1:
-                    continue
-                
-                # Verify this looks like a function definition
-                # Check if there's a closing paren before the brace (function signature)
-                paren_end = source.rfind(")", search_start, brace_start)
-                if paren_end == -1:
-                    continue
-                
-                # Look backwards for function-like context
-                # Accept if there's whitespace/newline before (likely a definition)
-                before_pos = max(0, pos - 100)
-                context = source[before_pos:pos]
-                # Skip if it's clearly a function call (has something like "function(" before)
-                if re.search(r'[a-zA-Z_][a-zA-Z0-9_]*\s*\([^)]*\)\s*$', context):
-                    continue
-
-                # Extract signature (from start of line or reasonable point before)
-                header_start = source.rfind("\n", 0, pos)
-                header_start = 0 if header_start == -1 else header_start
-                
-                # Get signature up to the brace
-                sig_start = max(header_start, brace_start - 1000)  # Allow longer signatures
-                signature = source[sig_start:brace_start].strip()
-                
-                # Extract function body
-                body, _ = GlibcAstParser._collect_brace_block(source, brace_start)
-                if body is None:
-                    continue
-
-                # Verify body is not empty and contains something useful
-                if len(body.strip()) < 10:
-                    continue
-
-                return signature, body
-
-        return None, None
-
-    @staticmethod
-    def _collect_brace_block(source: str, brace_index: int) -> Tuple[Optional[str], int]:
-        depth = 0
-        idx = brace_index
-        while idx < len(source):
-            char = source[idx]
-            if char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    return source[brace_index : idx + 1], idx
-            idx += 1
-        return None, idx
-
-    def _extract_macro_arguments_text(
-        self,
-        body: str,
-        macro_start: int,
-    ) -> Tuple[Optional[str], Optional[List[str]]]:
-        opening = body.find("(", macro_start - 1)
-        if opening == -1:
-            return None, None
-
-        args_block, _ = self._collect_parentheses_block(body, opening)
-        if args_block is None:
-            return None, None
-
-        arguments = self._split_arguments(args_block[1:-1])
-        return args_block, arguments
-
-    @staticmethod
-    def _collect_parentheses_block(
-        text: str,
-        open_index: int,
-    ) -> Tuple[Optional[str], int]:
-        depth = 0
-        idx = open_index
-        while idx < len(text):
-            char = text[idx]
-            if char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-                if depth == 0:
-                    return text[open_index : idx + 1], idx
-            idx += 1
-        return None, idx
-
-    @staticmethod
-    def _split_arguments(argument_block: str) -> List[str]:
-        arguments: List[str] = []
-        depth = 0
-        current: List[str] = []
-
-        for char in argument_block:
-            if char == "," and depth == 0:
-                argument = "".join(current).strip()
-                if argument:
-                    arguments.append(argument)
-                current = []
-                continue
-
-            if char in ("(", "{", "["):
-                depth += 1
-            elif char in (")", "}", "]"):
-                depth -= 1
-
-            current.append(char)
-
-        trailing = "".join(current).strip()
-        if trailing:
-            arguments.append(trailing)
-
-        return arguments
-
     # ------------------------------ Utilities ------------------------------ #
     @lru_cache(maxsize=256)
     def _search_globally(self, symbol: str) -> Optional[Path]:
@@ -614,12 +385,4 @@ class GlibcAstParser:
             return f"{file}:{location.line}"
         except Exception:
             return "<unknown>:0"
-
-
-def _merge_results(
-    base: Dict[str, List[SyscallCallInfo]],
-    incoming: Dict[str, List[SyscallCallInfo]],
-) -> None:
-    for key, value in incoming.items():
-        base.setdefault(key, []).extend(value)
 
